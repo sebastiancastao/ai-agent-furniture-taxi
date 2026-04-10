@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 type Message = {
   role: "user" | "assistant";
@@ -16,32 +16,66 @@ type OutcomeKey =
   | "ABANDONED"
   | "NEGATIVE";
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const starterMessage: Message = {
+  role: "assistant",
+  content:
+    "Hello. I am your moving quote assistant.\n\nTell me what you are moving, where it is going, and any details about stairs, elevators, or timing. I will help you build a clear quote.",
+};
 
-function formatMessage(content: string): string {
+function escapeHtml(content: string): string {
   return content
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .split("\n")
-    .map((line) => {
-      if (line.startsWith("- ") || line.startsWith("• "))
-        return `<li class="ml-4 list-disc">${line.slice(2)}</li>`;
-      return line ? `<span>${line}</span>` : "<br/>";
-    })
-    .join("\n");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+function formatMessage(content: string): string {
+  const safeContent = escapeHtml(content).replace(
+    /\*\*(.+?)\*\*/g,
+    "<strong>$1</strong>"
+  );
+  const lines = safeContent.split(/\r?\n/);
+  const html: string[] = [];
+  let listItems: string[] = [];
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    html.push(`<ul>${listItems.join("")}</ul>`);
+    listItems = [];
+  };
+
+  for (const line of lines) {
+    const isListItem =
+      line.startsWith("- ") || line.startsWith("* ") || line.startsWith("\u2022 ");
+
+    if (isListItem) {
+      listItems.push(`<li>${line.slice(2)}</li>`);
+      continue;
+    }
+
+    flushList();
+
+    if (!line.trim()) {
+      html.push('<div class="message-spacer"></div>');
+      continue;
+    }
+
+    html.push(`<p>${line}</p>`);
+  }
+
+  flushList();
+
+  return html.join("");
+}
 
 export default function Home() {
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<Message[]>([starterMessage]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-
-  // RL session state — persisted across turns
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [variantId, setVariantId] = useState<string | null>(null);
-
-  // Booking UI state
   const [outcomeRecorded, setOutcomeRecorded] = useState(false);
   const [showBookingBar, setShowBookingBar] = useState(false);
 
@@ -52,34 +86,33 @@ export default function Home() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Show booking bar once a quote appears in the conversation
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = "0px";
+    const nextHeight = Math.min(textarea.scrollHeight, 160);
+    textarea.style.height = `${Math.max(nextHeight, 56)}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 160 ? "auto" : "hidden";
+  }, [input]);
+
   useEffect(() => {
     const hasQuote = messages.some(
-      (m) =>
-        m.role === "assistant" &&
-        /\$\d+/.test(m.content) &&
-        /total|quote|estimate/i.test(m.content)
+      (message) =>
+        message.role === "assistant" &&
+        /\$\d+/.test(message.content) &&
+        /total|quote|estimate/i.test(message.content)
     );
-    if (hasQuote && !outcomeRecorded) setShowBookingBar(true);
-  }, [messages, outcomeRecorded]);
 
-  useEffect(() => {
-    if (messages.length === 0) {
-      setMessages([
-        {
-          role: "assistant",
-          content:
-            "Hi! I'm your moving quote assistant 🚛\n\nI'll help you get an accurate quote for your move. To get started — what are you looking to move, and where are you moving from and to?",
-        },
-      ]);
+    if (hasQuote && !outcomeRecorded) {
+      setShowBookingBar(true);
     }
-  }, []);
-
-  // ─── Record outcome ──────────────────────────────────────────────────────────
+  }, [messages, outcomeRecorded]);
 
   const recordOutcome = useCallback(
     async (outcome: OutcomeKey) => {
       if (!conversationId || !variantId || outcomeRecorded) return;
+
       setOutcomeRecorded(true);
       setShowBookingBar(false);
 
@@ -90,61 +123,67 @@ export default function Home() {
           body: JSON.stringify({
             conversationId,
             variantId,
-            messages: messages.filter((m) => m.content),
+            messages: messages.filter((message) => message.content),
             explicitOutcome: outcome,
           }),
         });
-      } catch (err) {
-        console.error("Failed to record outcome:", err);
+      } catch (error) {
+        console.error("Failed to record outcome:", error);
       }
     },
-    [conversationId, variantId, messages, outcomeRecorded]
+    [conversationId, messages, outcomeRecorded, variantId]
   );
 
-  // Auto-record on page unload
   useEffect(() => {
     const handleUnload = () => {
       if (conversationId && variantId && !outcomeRecorded && messages.length > 1) {
-        // Best-effort beacon
         navigator.sendBeacon(
           "/api/rl/outcome",
           JSON.stringify({
             conversationId,
             variantId,
-            messages: messages.filter((m) => m.content),
+            messages: messages.filter((message) => message.content),
           })
         );
       }
     };
-    window.addEventListener("beforeunload", handleUnload);
-    return () => window.removeEventListener("beforeunload", handleUnload);
-  }, [conversationId, variantId, messages, outcomeRecorded]);
 
-  // ─── Send message ────────────────────────────────────────────────────────────
+    window.addEventListener("beforeunload", handleUnload);
+
+    return () => {
+      window.removeEventListener("beforeunload", handleUnload);
+    };
+  }, [conversationId, messages, outcomeRecorded, variantId]);
 
   const sendMessage = async () => {
-    const text = input.trim();
-    if (!text || isLoading) return;
+    const trimmedInput = input.trim();
+    if (!trimmedInput || isLoading) return;
 
-    const userMessage: Message = { role: "user", content: text };
-    const newMessages = [...messages, userMessage];
-    setMessages(newMessages);
+    const userMessage: Message = { role: "user", content: trimmedInput };
+    const nextMessages = [...messages, userMessage];
+
+    setMessages(nextMessages);
     setInput("");
     setIsLoading(true);
-    setMessages((prev) => [...prev, { role: "assistant", content: "" }]);
+    setMessages((currentMessages) => [
+      ...currentMessages,
+      { role: "assistant", content: "" },
+    ]);
 
     try {
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: newMessages,
+          messages: nextMessages,
           conversationId,
           variantId,
         }),
       });
 
-      if (!response.body) throw new Error("No response body");
+      if (!response.body) {
+        throw new Error("No response body");
+      }
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
@@ -160,45 +199,48 @@ export default function Home() {
 
         for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
-          try {
-            const evt = JSON.parse(line.slice(6));
 
-            if (evt.type === "meta") {
-              // Capture session IDs on first response
-              if (!conversationId) setConversationId(evt.conversationId);
-              if (!variantId) setVariantId(evt.variantId);
-            } else if (evt.type === "text") {
-              setMessages((prev) => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
+          try {
+            const event = JSON.parse(line.slice(6));
+
+            if (event.type === "meta") {
+              if (!conversationId) setConversationId(event.conversationId);
+              if (!variantId) setVariantId(event.variantId);
+            } else if (event.type === "text") {
+              setMessages((currentMessages) => {
+                const updatedMessages = [...currentMessages];
+                const lastMessage = updatedMessages[updatedMessages.length - 1];
+
+                updatedMessages[updatedMessages.length - 1] = {
                   role: "assistant",
-                  content: updated[updated.length - 1].content + evt.text,
+                  content: lastMessage.content + event.text,
                 };
-                return updated;
+
+                return updatedMessages;
               });
-            } else if (evt.type === "error") {
-              setMessages((prev) => {
-                const updated = [...prev];
-                updated[updated.length - 1] = {
+            } else if (event.type === "error") {
+              setMessages((currentMessages) => {
+                const updatedMessages = [...currentMessages];
+                updatedMessages[updatedMessages.length - 1] = {
                   role: "assistant",
                   content: "Sorry, something went wrong. Please try again.",
                 };
-                return updated;
+                return updatedMessages;
               });
             }
           } catch {
-            // skip malformed SSE lines
+            continue;
           }
         }
       }
     } catch {
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[updated.length - 1] = {
+      setMessages((currentMessages) => {
+        const updatedMessages = [...currentMessages];
+        updatedMessages[updatedMessages.length - 1] = {
           role: "assistant",
           content: "Sorry, something went wrong. Please check your API key.",
         };
-        return updated;
+        return updatedMessages;
       });
     } finally {
       setIsLoading(false);
@@ -206,152 +248,257 @@ export default function Home() {
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
       sendMessage();
     }
   };
 
-  // ─── Render ──────────────────────────────────────────────────────────────────
+  const conversationStatus = isLoading
+    ? "Generating quote"
+    : showBookingBar
+      ? "Ready to confirm"
+      : messages.length > 1
+        ? "Conversation active"
+        : "Awaiting details";
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white border-b border-gray-200 px-4 py-4 shadow-sm">
-        <div className="max-w-3xl mx-auto flex items-center gap-3">
-          <div className="text-3xl">🚛</div>
-          <div>
-            <h1 className="text-xl font-bold text-gray-900">
-              Moving Quote Assistant
-            </h1>
-            <p className="text-sm text-gray-500">
-              Get an instant quote for your furniture move
-            </p>
-          </div>
-        </div>
-      </header>
+    <main className="relative min-h-screen overflow-hidden">
+      <div aria-hidden className="pointer-events-none absolute inset-0">
+        <div className="absolute left-[-8%] top-[-6%] h-80 w-80 rounded-full bg-white/90 blur-3xl [animation:drift_18s_ease-in-out_infinite]" />
+        <div className="absolute right-[-4%] top-[10%] h-72 w-72 rounded-full bg-sky-200/55 blur-3xl [animation:drift_16s_ease-in-out_infinite]" />
+        <div className="absolute bottom-[-10%] left-[24%] h-72 w-72 rounded-full bg-blue-100/55 blur-3xl [animation:drift_20s_ease-in-out_infinite]" />
+      </div>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-4 py-6">
-        <div className="max-w-3xl mx-auto space-y-4">
-          {messages.map((msg, i) => (
-            <div
-              key={i}
-              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-            >
-              {msg.role === "assistant" && (
-                <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-bold mr-2 mt-1 shrink-0">
-                  AI
-                </div>
-              )}
-              <div
-                className={`max-w-[80%] rounded-2xl px-4 py-3 ${
-                  msg.role === "user"
-                    ? "bg-blue-600 text-white rounded-tr-sm"
-                    : "bg-white text-gray-800 shadow-sm border border-gray-100 rounded-tl-sm"
-                }`}
-              >
-                {msg.content ? (
-                  <div
-                    className="text-sm leading-relaxed whitespace-pre-wrap"
-                    dangerouslySetInnerHTML={{
-                      __html: formatMessage(msg.content),
-                    }}
-                  />
-                ) : (
-                  <div className="flex gap-1 py-1">
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:0ms]" />
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:150ms]" />
-                    <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:300ms]" />
-                  </div>
-                )}
+      <div className="relative mx-auto flex min-h-screen w-full max-w-[1440px] flex-col px-4 py-4 sm:px-6 lg:px-8">
+        <header className="mb-4 rounded-[28px] border border-white/70 bg-white/72 px-5 py-4 shadow-[0_16px_60px_rgba(15,23,42,0.08)] backdrop-blur-2xl">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-4">
+              <div className="relative flex h-12 w-12 items-center justify-center overflow-hidden rounded-2xl bg-[linear-gradient(160deg,#0f172a,#334155)] text-sm font-semibold tracking-[0.3em] text-white shadow-[0_14px_30px_rgba(15,23,42,0.2)]">
+                FT
+                <div className="pointer-events-none absolute inset-x-2 top-1 h-px bg-white/45 [animation:gleam_7s_ease-in-out_infinite]" />
               </div>
-              {msg.role === "user" && (
-                <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center text-gray-600 text-sm font-bold ml-2 mt-1 shrink-0">
-                  You
-                </div>
-              )}
+              <div>
+                <p className="text-[0.68rem] font-medium uppercase tracking-[0.34em] text-slate-400">
+                  Furniture Taxi
+                </p>
+                <h1 className="text-lg font-semibold tracking-[-0.03em] text-slate-950 sm:text-xl">
+                  Premium moving quote assistant
+                </h1>
+              </div>
             </div>
-          ))}
-          <div ref={messagesEndRef} />
-        </div>
-      </div>
 
-      {/* Booking bar — appears once a quote is shown */}
-      {showBookingBar && !outcomeRecorded && (
-        <div className="bg-green-50 border-t border-green-200 px-4 py-3">
-          <div className="max-w-3xl mx-auto flex flex-col sm:flex-row items-center gap-3">
-            <p className="text-sm text-green-800 font-medium flex-1">
-              Ready to lock in your move? 🎉
-            </p>
-            <div className="flex gap-2 shrink-0">
-              <button
-                onClick={() => recordOutcome("BOOKED")}
-                className="bg-green-600 hover:bg-green-700 text-white text-sm font-semibold px-4 py-2 rounded-lg transition-colors"
-              >
-                ✓ Book Now
-              </button>
-              <button
-                onClick={() => recordOutcome("QUOTE_ACCEPTED")}
-                className="bg-white border border-green-300 hover:bg-green-50 text-green-700 text-sm font-medium px-4 py-2 rounded-lg transition-colors"
-              >
-                Interested
-              </button>
-              <button
-                onClick={() => recordOutcome("NEGATIVE")}
-                className="text-gray-400 hover:text-gray-600 text-sm px-3 py-2 transition-colors"
-              >
-                Not now
-              </button>
+            <div className="flex flex-wrap items-center gap-2 text-xs font-medium text-slate-500">
+              <span className="rounded-full border border-white/85 bg-white/80 px-3 py-1.5 shadow-sm">
+                White-glove planning
+              </span>
+              <span className="rounded-full border border-white/85 bg-white/80 px-3 py-1.5 shadow-sm">
+                Real-time pricing
+              </span>
+              <span className="rounded-full border border-white/85 bg-white/80 px-3 py-1.5 shadow-sm">
+                Clean booking flow
+              </span>
             </div>
           </div>
-        </div>
-      )}
+        </header>
 
-      {/* Booking confirmation */}
-      {outcomeRecorded && (
-        <div className="bg-blue-50 border-t border-blue-200 px-4 py-3 text-center text-sm text-blue-700">
-          Thank you! Your response has been recorded. We&apos;ll be in touch shortly. 📞
-        </div>
-      )}
+        <div className="flex flex-1 justify-center">
+          <section className="flex min-h-[72vh] w-full max-w-[1120px] flex-col overflow-hidden rounded-[34px] border border-white/70 bg-[linear-gradient(180deg,rgba(248,250,252,0.86),rgba(255,255,255,0.82))] shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-2xl">
+            <div className="border-b border-white/70 bg-white/55 px-5 py-4 sm:px-6">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-[0.68rem] font-medium uppercase tracking-[0.34em] text-slate-400">
+                    Live quote studio
+                  </p>
+                  <h2 className="mt-1 text-lg font-semibold tracking-[-0.03em] text-slate-950">
+                    Concierge conversation
+                  </h2>
+                </div>
 
-      {/* Input */}
-      <div className="bg-white border-t border-gray-200 px-4 py-4">
-        <div className="max-w-3xl mx-auto flex gap-3 items-end">
-          <textarea
-            ref={textareaRef}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Describe what you need to move…"
-            rows={1}
-            className="flex-1 resize-none rounded-xl border border-gray-300 px-4 py-3 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent max-h-32 overflow-y-auto"
-            style={{ minHeight: "48px" }}
-            disabled={isLoading}
-          />
-          <button
-            onClick={sendMessage}
-            disabled={!input.trim() || isLoading}
-            className="shrink-0 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white rounded-xl px-4 py-3 text-sm font-medium transition-colors flex items-center gap-2"
-          >
-            {isLoading ? (
-              <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-            ) : (
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-              </svg>
-            )}
-            Send
-          </button>
+                <div className="flex items-center gap-2 self-start rounded-full bg-slate-950/[0.04] px-3 py-1.5 text-xs font-medium text-slate-600 sm:self-auto">
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      isLoading
+                        ? "animate-pulse bg-sky-500"
+                        : showBookingBar
+                          ? "bg-emerald-500"
+                          : "bg-slate-400"
+                    }`}
+                  />
+                  {conversationStatus}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
+              <div className="space-y-4">
+                {messages.map((message, index) => {
+                  const isAssistant = message.role === "assistant";
+
+                  return (
+                    <div
+                      key={`${message.role}-${index}`}
+                      className={`flex items-end gap-3 ${
+                        isAssistant ? "justify-start" : "justify-end"
+                      }`}
+                    >
+                      {isAssistant && (
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-[linear-gradient(160deg,#0f172a,#334155)] text-[0.68rem] font-semibold tracking-[0.28em] text-white shadow-[0_12px_30px_rgba(15,23,42,0.18)]">
+                          FT
+                        </div>
+                      )}
+
+                      <div
+                        className={`max-w-[86%] rounded-[28px] px-4 py-3.5 sm:max-w-[78%] sm:px-5 ${
+                          isAssistant
+                            ? "rounded-bl-md border border-white/80 bg-white/92 text-slate-800 shadow-[0_18px_45px_rgba(15,23,42,0.07)]"
+                            : "rounded-br-md bg-[linear-gradient(135deg,#0f172a,#1e3a8a)] text-white shadow-[0_18px_45px_rgba(15,23,42,0.14)]"
+                        }`}
+                      >
+                        {message.content ? (
+                          <div
+                            className={`message-content text-sm leading-7 ${
+                              isAssistant ? "text-slate-700" : "text-white/92"
+                            }`}
+                            dangerouslySetInnerHTML={{
+                              __html: formatMessage(message.content),
+                            }}
+                          />
+                        ) : (
+                          <div className="flex items-center gap-1.5 py-1 text-slate-400">
+                            <span className="h-2 w-2 rounded-full bg-current animate-bounce [animation-delay:0ms]" />
+                            <span className="h-2 w-2 rounded-full bg-current animate-bounce [animation-delay:150ms]" />
+                            <span className="h-2 w-2 rounded-full bg-current animate-bounce [animation-delay:300ms]" />
+                          </div>
+                        )}
+                      </div>
+
+                      {!isAssistant && (
+                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/80 bg-white/82 text-xs font-semibold text-slate-600 shadow-sm">
+                          Y
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+
+                <div ref={messagesEndRef} />
+              </div>
+            </div>
+
+            <div className="border-t border-white/70 bg-white/60 px-4 pb-4 pt-4 sm:px-6 sm:pb-6">
+              {showBookingBar && !outcomeRecorded && (
+                <div className="mb-4 rounded-[28px] border border-emerald-200/80 bg-emerald-50/85 p-4 shadow-[0_12px_34px_rgba(16,185,129,0.08)]">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-emerald-950">
+                        Ready to lock in this move?
+                      </p>
+                      <p className="mt-1 text-sm text-emerald-700">
+                        Confirm the quote or save your interest for follow-up.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => recordOutcome("BOOKED")}
+                        className="rounded-full bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-700"
+                      >
+                        Book now
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => recordOutcome("QUOTE_ACCEPTED")}
+                        className="rounded-full border border-emerald-300 bg-white px-4 py-2 text-sm font-semibold text-emerald-700 transition hover:bg-emerald-100"
+                      >
+                        Interested
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => recordOutcome("NEGATIVE")}
+                        className="rounded-full px-4 py-2 text-sm font-medium text-emerald-700/80 transition hover:bg-emerald-100"
+                      >
+                        Not now
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {outcomeRecorded && (
+                <div className="mb-4 rounded-[28px] border border-sky-200/80 bg-sky-50/90 px-4 py-3 text-sm font-medium text-sky-800 shadow-[0_10px_24px_rgba(14,165,233,0.08)]">
+                  Thank you. Your response has been recorded and the team can
+                  follow up from here.
+                </div>
+              )}
+
+              <div className="rounded-[30px] border border-white/85 bg-white/88 p-2 shadow-[0_16px_40px_rgba(15,23,42,0.08)]">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    onChange={(event) => setInput(event.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder="Describe the move, inventory, and timing..."
+                    className="min-h-[56px] flex-1 resize-none bg-transparent px-4 py-3 text-[15px] leading-6 text-slate-900 placeholder:text-slate-400 focus:outline-none"
+                    disabled={isLoading}
+                  />
+
+                  <button
+                    type="button"
+                    onClick={sendMessage}
+                    disabled={!input.trim() || isLoading}
+                    className="inline-flex h-14 items-center justify-center gap-2 rounded-[22px] bg-[linear-gradient(135deg,#0f172a,#1e3a8a)] px-5 text-sm font-semibold text-white shadow-[0_16px_36px_rgba(15,23,42,0.18)] transition hover:translate-y-[-1px] hover:shadow-[0_20px_40px_rgba(15,23,42,0.22)] disabled:translate-y-0 disabled:cursor-not-allowed disabled:bg-slate-300 disabled:shadow-none"
+                  >
+                    {isLoading ? (
+                      <svg
+                        className="h-4 w-4 animate-spin"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                      >
+                        <circle
+                          className="opacity-25"
+                          cx="12"
+                          cy="12"
+                          r="10"
+                          stroke="currentColor"
+                          strokeWidth="4"
+                        />
+                        <path
+                          className="opacity-75"
+                          fill="currentColor"
+                          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
+                        />
+                      </svg>
+                    ) : (
+                      <svg
+                        className="h-4 w-4"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={1.8}
+                          d="M4.75 12.75l13.5-7-4.5 12-2.25-4.75-4.75-.25z"
+                        />
+                      </svg>
+                    )}
+                    Send
+                  </button>
+                </div>
+              </div>
+
+              <p className="mt-3 text-center text-xs font-medium tracking-[0.08em] text-slate-400">
+                Press Enter to send | Shift+Enter for a new line
+              </p>
+            </div>
+          </section>
         </div>
-        <p className="text-xs text-gray-400 text-center mt-2">
-          Press Enter to send · Shift+Enter for new line
-        </p>
       </div>
-    </div>
+    </main>
   );
 }

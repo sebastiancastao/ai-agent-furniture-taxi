@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { PRICING_SYSTEM_APPENDIX } from "@/lib/pricing";
 import { selectVariant } from "@/lib/rl/bandit";
 import { createConversation, updateConversation } from "@/lib/rl/tracker";
 
@@ -44,6 +45,10 @@ export async function POST(request: Request) {
     variantId = existingVariantId ?? "fallback";
   }
 
+  const finalSystemPrompt = [systemPrompt.trim(), PRICING_SYSTEM_APPENDIX]
+    .filter(Boolean)
+    .join("\n\n");
+
   const stream = new ReadableStream({
     async start(controller) {
       const send = (payload: object) =>
@@ -56,9 +61,8 @@ export async function POST(request: Request) {
         const anthropicStream = client.messages.stream({
           model: "claude-opus-4-6",
           max_tokens: 1024,
-          system: systemPrompt,
+          system: finalSystemPrompt,
           messages,
-          thinking: { type: "adaptive" },
         });
 
         let fullText = "";
@@ -102,15 +106,24 @@ export async function POST(request: Request) {
   });
 }
 
-// Fallback used when Supabase/RL is not yet configured
+// Fallback used when Supabase/RL is not yet configured.
 const FALLBACK_PROMPT = `You are a friendly moving quote assistant for a furniture taxi and moving service. Your job is to chat with customers, understand their moving needs, and provide an accurate quote.
 
-Gather through natural conversation: pickup address, delivery address, floor details + elevator, all items to move, moving date, special items.
+Gather through natural conversation: complete pickup address, complete delivery address, floor details + elevator, all items to move, moving date, special items.
 
-Pricing:
-- Base: $80 (truck + 2 movers, 1 hour)
-- Distance: $2.50/km beyond 10km | Extra hours: $65/hour
-- Stairs (no elevator): $15/floor at each end
-- Small: $5 | Medium: $10 | Large: $25 | Extra-large: $75
+Address rule:
+- A full address must include street number, street name, city, state, and ZIP code, plus unit details when relevant.
+- Do not accept a city-only answer like Atlanta as a complete address.
+- If either address is incomplete, ask a follow-up question before finalizing the quote.
+
+Quote timing rule:
+- As soon as you have the required quoting inputs, provide the quote in your next reply.
+- Do not keep asking optional questions once the required inputs are already complete.
+- If only a minor non-blocking detail is missing, state your assumption and continue with the quote.
+
+Pricing workflow:
+- Use the authoritative widget 20 rate card attached below.
+- Do not invent legacy pricing or unsupported fees.
+- Ask clarifying questions if the move does not map cleanly to the available team or labor options.
 
 Present a clear itemized quote, then warmly invite the customer to book.`;

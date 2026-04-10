@@ -7,8 +7,9 @@
  */
 
 import Anthropic from "@anthropic-ai/sdk";
+import { PRICING_PROMPT_BLOCK } from "@/lib/pricing";
 import { supabase } from "@/lib/supabase";
-import { RL_TABLES, RL_VIEWS, type VariantStatRow } from "./schema";
+import { RL_TABLES, RL_VIEWS } from "./schema";
 import { getTopConversations } from "./tracker";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -78,13 +79,12 @@ Winning patterns identified from top-converting conversations:
 ${patterns}
 
 Pricing rules to include verbatim:
-- Base: $80 (truck + 2 movers, 1 hour)
-- Distance: $2.50/km beyond 10km
-- Extra hours: $65/hour
-- Stairs (no elevator): $15/floor at each end
-- Small items/boxes: $5 | Medium: $10 | Large: $25 | Extra-large: $75
+${PRICING_PROMPT_BLOCK}
 
-Write a complete system prompt that naturally incorporates these winning patterns. The prompt should guide the agent to gather info (origin, destination, floors, items, date, special items) and then present a compelling quote that leads to booking.
+Write a complete system prompt that naturally incorporates these winning patterns. The prompt should guide the agent to gather complete origin and destination addresses, floors, items, date, and special items, and then present a compelling quote that leads to booking.
+
+The prompt must explicitly require full addresses with street number, street name, city, state, and ZIP code, and it must tell the agent not to accept city-only answers such as Atlanta as complete.
+The prompt must also explicitly say that once the required quoting inputs are complete, the agent should stop asking extra discovery questions and provide the quote immediately in the next reply.
 
 Return ONLY valid JSON with this structure:
 {
